@@ -11,10 +11,11 @@
 #
 #
 # INSTALLATION
-# This script must be run on the same VM as your Kai server.
+# This script must be run in a location with access to your Kai
+# server at https://yoursitename.kailabor.com.
 #
 # 1. Install ruby and gems
-# Install Ruby (tested with version 2.2), and the following gems:
+# Install Ruby (tested with version 2.5), and the following gems:
 #   sinatra
 #   rest-client
 # eg. `sudo gem install sinatra rest-client`
@@ -31,24 +32,17 @@
 # ```
 #
 # 3. Configure beverage-on-demand
-# Configure beverage-on-demand to provide HTTP POSTs to the VM's
-# IP address with the configured port number, e.g.
+# Configure beverage-on-demand to provide HTTP POSTs to the system's
+# IP address with the configured port number at the /bod endpoint, e.g.
 #  http://10.2.3.4:4567/bod
-#
-# It is highly recommended to use /bod as the endpoint for forward
-# compatibility. This service will accept any endpoint, however.
 #
 # 4. Configure calls in Kai
 # Create calls matching beverage menu items as desired. See
 # "CALL CONFIGURATION" section below.
 #
 # 5. Install script
-# Install this script on the VM, and set up whatever monitoring is
-# desired. The supplied `bodbridge.service` script is intended for use
-# on systems running systemd.
-#
-# The site name must be supplied as the first command line argument, eg.
-# bodbridge.rb tablemountaincasino
+# Install a systemd or other script as appropriate for your system to
+# ensure bodbridge remains running.
 #
 # Note that bodbridge writes helpful debug output to STDOUT, and error
 # messages to STDERR.
@@ -69,11 +63,11 @@
 # names. It will use the first matching call it finds that is configured.
 #  (* indicates wildcard, matches are case insensitive)
 #
-#  - Beverage*coffee
-#  - Request*coffee
-#  - Coffee*request
-#  - Coffee*beverage
-#  - Coffee
+#  - *Beverage*coffee*
+#  - *Request*coffee*
+#  - *Coffee*beverage*
+#  - *Coffee*request*
+#  - *Coffee*
 #  - Beverage request
 #  - Drink request
 #  - Service
@@ -132,7 +126,7 @@ end
 def enforce_command_line!
   die_with_usage!("Too many arguments") if ARGV.count > 1
   if ARGV.count == 1 then
-    port_arg = ARGV[1]
+    port_arg = ARGV[0]
     die_with_usage!("http_port_num must be integer") if port_arg.match(/^\d+$/).nil?
     die_with_usage!("http_port_num must be positive") if port_arg.to_i <= 0
     die_with_usage!("http_port_num must be less than 65536") if port_arg.to_i >= 65536
@@ -184,31 +178,36 @@ helpers do
   end
 
   def api_request(req_method, endpoint, data=nil)
-    args = data.nil? ? {} : {data:data.to_json, content_type: :json}
     url = api_url(endpoint)
     req_method = req_method.to_s.downcase.to_sym
     uc_method = req_method.to_s.upcase
 
     begin
-      resp = RestClient.send(req_method, url, args)
+      resp = if req_method == :get then
+        RestClient.get(url)
+      else
+        RestClient.send(req_method, url, data, content_type: :json)
+      end
       result = JSON.parse(resp.body, symbolize_names:true)
     rescue RestClient::ExceptionWithResponse => err
       case err.http_code
       when 301, 302, 307
         err.response.follow_redirection
       else
-        raise APIRequestError, "Failed API request #{uc_method} #{url}: received HTTP #{err.http_code}.\nRequest body: #{args[:data] || "(null)"}\nResponse body:\n#{err.response.body}"
+        raise APIRequestError, "Failed API request #{uc_method} #{url}: received HTTP #{err.http_code}.\nRequest body: #{data || "(null)"}\nResponse body:\n#{err.response.body}"
       end
     rescue Exception => exc
-      raise APIRequestError, "Failed API request #{uc_method} #{url}: caught exception #{exc.class} #{exc}.\nRequest body: #{args[:data] || "(null)"}"
+      raise APIRequestError, "Failed API request #{uc_method} #{url}: caught exception #{exc.class} #{exc}.\nRequest body: #{data || "(null)"}"
     end
   end
 
-  def map_request(request_json)
+  def dispatch_request(request_json)
     begin
-      request = parse_request(request_json)
-      id_call_config = find_call(request[:drink])
-      create_call(id_call_config, request)
+      log "#{request.ip} #{request.request_method} #{request.url}: #{request_json}"
+      parsed = parse_request(request_json)
+      call_config = find_call(parsed[:drink])
+      create_call(call_config, parsed)
+      "OK"
     rescue Exception => exc
       bt = exc.backtrace.map { |line| "    #{line.to_s}" }.join("\n")
       lines = []
@@ -219,6 +218,7 @@ helpers do
       lines << request_json
       lines << "Backtrace:\n#{bt}"
       error_out lines.join("\n")
+      "Error handling request: #{exc.class}"
     end
   end
 
@@ -226,6 +226,7 @@ helpers do
     begin
       raw = JSON.parse(request_json, symbolize_names:true)
     rescue JSON::ParserError
+      puts request_json
       raise UnsupportedRequestFormatError, "Unable to parse request as JSON"
     end
 
@@ -249,52 +250,127 @@ helpers do
     request = {
       drink:raw[:order][:cart].first[:name],
       location:raw[:cabinet][:Location],
+      zone:find_zone(raw[:cabinet][:Location]),
       description:description
     }
   end
 
   def find_call(drink_name)
     # find an id_call_config for a requested drink name
+    drink_lower = drink_name.downcase
     patterns = [
-      /beverage.*#{drink_name}/,
-      /request.*#{drink_name}/,
-      /#{drink_name}.*request/,
-      /#{drink_name}.*beverage/,
-      /#{drink_name}/,
-      /beverage request/,
-      /drink request/,
-      /service/,
+      /beverage.*#{drink_lower}$/,
+      /request.*#{drink_lower}$/,
+      /^#{drink_lower}.*beverage/,
+      /^#{drink_lower}.*request/,
+      /beverage.*#{drink_lower}/,
+      /request.*#{drink_lower}/,
+      /#{drink_lower}.*beverage/,
+      /#{drink_lower}.*request/,
+      /#{drink_lower}/,
+      /^drink request$/,
+      /^beverage request$/,
+      /^service$/,
     ]
 
     resp = api_request(:get, "call-config")
 
     patterns.each do |pattern|
-      matched_id = resp[:call_config]
+      matched = resp
         .select { |cfg| cfg[:description].downcase.match(pattern) }
-        .map { |config| config[:id_call_config] }
-        .max
-      return matched_id unless matched_id.nil?
+      log matched
+      return matched.max_by { |config| config[:id] } unless matched.empty?
     end
 
     raise UnsupportedDrinkError, "Unable to find call for requested item: #{drink_name}"
   end
 
-  def create_call(id_call_config, request)
-    log "Creating call with id_call_config=#{id_call_config} for drink #{request[:drink]} at location #{request[:location]}"
+  def zonefile
+    exists = File.exists?(ZONEFILE)
+    recent = (Time.now - File.mtime(ZONEFILE) < ZONEFILE_EXPIRATION_TIME) rescue nil
+
+    update_zonefile unless exists && recent
+
+    cached = ($zonefile && Time.now - $zonefile_time < ZONEFILE_EXPIRATION_TIME) rescue nil
+    cache_current = ($zonefile_time >= File.mtime(ZONEFILE)) rescue nil
+    unless cached && cache_current then
+      attempts = 0
+      begin
+        attempts += 1
+        $zonefile = JSON.parse(IO.read(ZONEFILE), symbolize_names:true)
+        $zonefile_time = Time.now
+        log "Zonefile recached"
+      rescue JSON::ParserError
+        error_out "Unparseable zonefile at #{ZONEFILE}; rebuilding..."
+        File.unlink(ZONEFILE)
+        update_zonefile
+        retry unless attempts > 1
+      end
+    end
+
+    $zonefile
+  end
+
+  def update_zonefile
+    text = if ZONEFILE_SCRIPT && File.executable?(ZONEFILE_SCRIPT) then
+      log "Updating zonefile from script at #{ZONEFILE_SCRIPT}"
+      output = `"#{ZONEFILE_SCRIPT}"`
+      build_zonefile_from_api unless $?.to_i == 0
+      output
+    else
+      build_zonefile_from_api
+    end
+
+    IO.write(ZONEFILE, text)
+  end
+
+  def build_zonefile_from_api
+    log "Updating zonefile from API"
+    zones = {}
+    api_request(:get, "zone?all=true").each do |zone|
+      zones[zone[:description]] = zone
+    end
+
+    zones.to_json
+  end
+
+  def find_zone(location)
+    loc = location.to_sym
+    update_zonefile unless zonefile[location.to_sym]
+    unless zonefile[location.to_sym] then
+      error_out "Unable to find location named #{location.to_sym}"
+      return nil
+    end
+
+    zonefile[location.to_sym][:id]
+  end
+
+  def create_call(call_config, request, params={})
+    id_call_config = call_config[:id]
+    log "Creating call with id_call_config=#{id_call_config} (\"#{call_config[:description]}\") for drink #{request[:drink]} at location #{request[:location]} (id_zone=#{request[:zone] || "null"})"
     kai_req = {
       idCallConfig:id_call_config,
-      location:request[:location],
+      idZone:request[:zone],
       description:request[:description]
     }
 
-    resp = api_request(:post, "call", kai_req)
-    log "Kai API accepted call with id_call_config=#{id_call_config} for drink #{request[:drink]} at location #{request[:location]}"
+    return kai_req if params[:dryrun]
+    resp = api_request(:post, "call", kai_req.to_json)
+    log "Kai API accepted call with id_call_config=#{id_call_config} for drink #{request[:drink]} at location #{request[:location]} (idZone=#{request[:zone] || "null"})"
     resp
   end
 end
 
 DEFAULT_PORT = 4567
 KAI_CREDENTIALS_FILE = File.expand_path("./kai_bod_api_credentials")
+
+ZONEFILE = File.expand_path("./.kai_bod_zonefile")
+ZONEFILE_SCRIPT = ENV["ZONEFILE_SCRIPT"] || File.join(File.dirname(__FILE__), "build_zonefile")
+ZONEFILE_EXPIRATION_TIME = if ENV["ZONEFILE_EXPIRATION_TIME"]
+  ENV["ZONEFILE_EXPIRATION_TIME"].to_f
+else
+  60*60 # refresh zonefile every hour by default
+end
 
 enforce_command_line!
 port = ARGV.count >= 1 ? ARGV[0].to_i : DEFAULT_PORT
@@ -308,7 +384,7 @@ $config = {
   },
 
   http:{
-    port:4567
+    port:port
   },
 
   version:"2019-04-30"
@@ -329,30 +405,40 @@ end
 
 post '/bod' do
   begin
-    request_json = request.body.read
-    log "#{request.ip} #{request.request_method} #{request.url}: #{request_json}"
-    map_request(request_json)
+    dispatch_request(request.body.read)
   rescue Exception => exc
     error_out "Caught exception handling request: #{exc.class} #{exc}"
     raise exc
   end
 end
 
-post '/test/parse' do
+post '/test/parse_request' do
   parse_request(request.body.read).to_json
+end
+
+post '/test/map_request' do
+  parsed = parse_request(request.body.read)
+  find_call(parsed[:drink]).to_json
+end
+
+post '/test/dispatch_dryrun' do
+  parsed = parse_request(request.body.read)
+  call_config = find_call(parsed[:drink])
+  create_call(call_config, parsed, dryrun:true).to_json
 end
 
 post '/test/find_call' do
   data = JSON.parse(request.body.read, symbolize_names:true)
-  { id_call_config:find_call(data[:drink]) }.to_json
+  find_call(data[:drink]).to_json
 end
 
 post '/test/create_call' do
-  data = JSON.parse(request.body.read, symbolize_names:true)
+  data = JSON.parse(request.body.read, symbolize_names:true) rescue {}
   id_call_config = data[:id_call_config] || 481
   test_req = {
           drink:data[:drink]       || "Diet Pepsi",
        location:data[:location]    || "JJ0103",
+           zone:data[:zone]        || find_zone("JJ0103"),
     description:data[:description] || "Test call",
   }
 

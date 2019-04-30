@@ -1,0 +1,38 @@
+#!/usr/bin/ruby
+
+require 'mysql2'
+require 'json'
+
+def strip_quotes(str)
+  return str unless str.length >= 2 && str[0] == "\"" && str[-1] == "\""
+  str[1..-2]
+end
+
+def parse_my_cnf
+  mycnf = IO.read(File.expand_path("~/.my.cnf"))
+  username = mycnf.match(/user\s*=\s*([^\n]+)/)[1]
+  password = strip_quotes(mycnf.match(/password\s*=\s*([^\n]+)/)[1])
+  {username:username, password:password}
+end
+
+zones = {}
+
+client_params = {host: "localhost"}.merge(parse_my_cnf)
+client = Mysql2::Client.new(client_params)
+
+sql = "SELECT id_zone, description " +
+  "FROM rt.zone " +
+  "WHERE deleted=0 " +
+  "AND is_dropped=0"
+query_params = {symbolize_keys:true}
+
+results = client.query(sql, query_params)
+results.each do |row|
+  zones[row[:description]] = {
+    __class:nil,
+    id:row[:id_zone],
+    description:row[:description]
+  }
+end
+
+puts zones.to_json
