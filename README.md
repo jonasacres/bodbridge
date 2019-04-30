@@ -121,8 +121,6 @@ If the server running bodbridge can reach https://sitename.kailabor.com, use `ns
 
 If no issues are found in any of these steps, check the log output of bodbrdige (as written to stdout and stderr) for more information.
 
-### Problem: 
-
 ## AUTHOR
 
 Completed on contract for Acres Bonusing.
