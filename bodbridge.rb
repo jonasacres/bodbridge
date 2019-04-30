@@ -63,13 +63,18 @@
 # names. It will use the first matching call it finds that is configured.
 #  (* indicates wildcard, matches are case insensitive)
 #
+#  - *Beverage*coffee
+#  - *Request*coffee
+#  - Coffee*beverage*
+#  - Coffee*request*
+#  - Coffee
 #  - *Beverage*coffee*
 #  - *Request*coffee*
 #  - *Coffee*beverage*
 #  - *Coffee*request*
 #  - *Coffee*
-#  - Beverage request
 #  - Drink request
+#  - Beverage request
 #  - Service
 #
 # If no matching calls are found, no call is created.
@@ -77,6 +82,12 @@
 # listed highest above will be used. If multiple calls exist for the
 # same pattern, the one with the highest id_call_config is used.
 #
+# Be very careful to match Kai call names to menu names. For instance,
+# if a drink is called "Dr. Pepper" in the menu, but "Dr Pepper" in Kai
+# (note the missing dot), the call will not map over.
+#
+# Names are not case sensitive, so "Dr. pepper" will map to "Dr. Pepper"
+# without issue.
 #
 # MULTIPLE ITEMS IN ORDER
 # If an order contains multiple items, only the first item is used
@@ -263,6 +274,7 @@ helpers do
       /request.*#{drink_lower}$/,
       /^#{drink_lower}.*beverage/,
       /^#{drink_lower}.*request/,
+      /^#{drink_lower}$/,
       /beverage.*#{drink_lower}/,
       /request.*#{drink_lower}/,
       /#{drink_lower}.*beverage/,
