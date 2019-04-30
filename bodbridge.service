@@ -1,0 +1,11 @@
+[Unit]
+Description=Beverage-on-demand to Kai bridge
+
+[Service]
+PIDFile=/tmp/bodbridge.pid
+ExecStart=/home/acres4/bodbridge/bodbridge.rb 4567
+Restart=on-abort
+User=acres4
+
+[Install]
+WantedBy=multi-user.target
