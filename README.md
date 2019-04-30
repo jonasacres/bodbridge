@@ -10,11 +10,13 @@ This script must be run in a location with access to your Kai server at https://
 
 ### 1. Install ruby and gems
 
-Install Ruby (tested with version 2.5), and the following gems:
+Install Ruby, and the following gems:
   - sinatra
   - rest-client
 
 eg. `sudo gem install sinatra rest-client`
+
+bodbridge was developed with Ruby 2.3.1p112, sinatra 2.0.5 and rest-client 1.8.0.
 
 ### 2. Configure API credentials
 
@@ -78,27 +80,52 @@ If an order contains multiple items, only the first item is used in selecting an
 
 ## TROUBLESHOOTING
 
-Problem: UnsupportedDrinkError exceptions
+### Problem: UnsupportedDrinkError exceptions
 
-Resolution: Ensure that Kai call configuration has at least one call enabled that supports a beverage with the indicated name. See "CALL CONFIGURATION" section for more information.
+**Resolution**: Ensure that Kai call configuration has at least one call enabled that supports a beverage with the indicated name. See "CALL CONFIGURATION" section for more information.
 
-Problem: APIRequestError exceptions
+### Problem: APIRequestError exceptions
 
-Resolution: Ensure that Kai API user credentials are set up with Kai, and correctly specifeid in the ./kai_bod_api_credentials file. Also check that Kai API server is reachable from the machine running bodbridge as
+**Resolution**: Ensure that Kai API user credentials are set up with Kai, and correctly specifeid in the ./kai_bod_api_credentials file. Also check that Kai API server is reachable from the machine running bodbridge as
 `https://username:password@sitename.kailabor.com/api/v3`
 
-Problem: UnsupportedRequestFormatError exceptions
+### Problem: UnsupportedRequestFormatError exceptions
 
-Resolution: Request format received from BOD is not understood by this script.
+**Resolution**: Request format received from BOD is not understood by this script.
 
 Ensure that bodbridge is receiving callbacks from supported version of BOD.
 
+### Problem: Pepsi maps as Diet Pepsi
+
+**Resolution**: Ensure that you have a properly-named Pepsi call. Otherwise, per the rules of name matching, Pepsi may match to a Diet Pepsi call due to the similarity in names.
+
+### Problem: Orders create generic calls instead of item-specific calls
+
+**Resolution**: Check that spelling of menu item matches spelling of call in Kai, and that the calls in Kai are configured as machine-generated events.
+
+### Problem: Orders do not create calls
+
+**Resolution**: Ensure that a machine-generated call in Kai is configured with the name "Drink Request". It does not matter which events map to this call, but it is highly recommended that you select an event that is never observed on your slot floor to avoid generating duplicate or mistaken calls.
+
+If call configuration looks correct, then ensure that bodbridge is running. You can point your web browser at bodbridge, e.g. `http://10.2.3.4:4567/bod` (substituting in the correct IP address and port for your environment) and check to see if you get a response indicating that bodbridge is running at that address.
+
+If bodbridge is running, check that Beverage-on-demand is configured to send a POST to bodbridge at that URL when drink orders are received. Consult your Beverage-on-demand documentation for more information.
+
+If Beverage-on-demand is configured to send this POST request, ensure that there are no routing issues such as firewalls preventing the Beverage-on-demand server from reaching the bodbridge URL.
+
+If the Beverage-on-demand server can reach bodbridge, check that the server running bodbridge has correctly configured the site name, API username and API password as described in "Configure API Credentials" above. Reset the API user's password if needed to ensure that the username and password have not been changed since configuring bodbridge.
+
+If bodbridge is configured with the correct site name, API username and password, ensure that the server running bodbridge can reach https://sitename.kailabor.com, where "sitename" is your configured Kai site name.
+
+If the server running bodbridge can reach https://sitename.kailabor.com, use `nslookup` or `dig` or a similar tool to ensure that the DNS entry for `sitename.kailabor.com` resolves to the expected IP address, and not an IP address for a server in a different environment (e.g. you may be reaching your test environment when you intend to be reaching your production site).
+
+If no issues are found in any of these steps, check the log output of bodbrdige (as written to stdout and stderr) for more information.
+
+### Problem: 
 
 ## AUTHOR
 
 Completed on contract for Acres Bonusing.
 
-Jonas Acres
-jonas@acrescrypto.com
-702-481-4146
+Jonas Acres, jonas@acrescrypto.com, 702-481-4146
 
