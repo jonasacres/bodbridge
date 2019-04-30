@@ -16,19 +16,13 @@
 # 1. Install ruby and gems
 # Install Ruby (tested with version 2.2), and the following gems:
 #   sinatra
-#   mysql2
-# eg. `sudo gem install sinatra mysql2`
+#   rest-client
+# eg. `sudo gem install sinatra rest-client`
 # 
-# 2. Configure .my.cnf
-# In the home directory of the user running this script, create a
-# .my.cnf file containing the username and password that the script
-# should use when accessing MySQL. This user must have read access to
-# the `rt` database.
-#
-# 3. Configure API credentials
+# 2. Configure API credentials
 # Set up an API user in Kai. Place the sitename, username and password each on
-# their own line in a file called "~/kai_bod_api_credentials" relative to the
-# user running this script, eg.
+# their own line in a file called "./kai_bod_api_credentials" relative to the
+# working directory when running this script, eg.
 # 
 # ```
 # rivervalleycasino
@@ -36,7 +30,7 @@
 # SecretPassword123
 # ```
 #
-# 4. Configure beverage-on-demand
+# 3. Configure beverage-on-demand
 # Configure beverage-on-demand to provide HTTP POSTs to the VM's
 # IP address with the configured port number, e.g.
 #  http://10.2.3.4:4567/bod
@@ -44,11 +38,11 @@
 # It is highly recommended to use /bod as the endpoint for forward
 # compatibility. This service will accept any endpoint, however.
 #
-# 5. Configure calls in Kai
+# 4. Configure calls in Kai
 # Create calls matching beverage menu items as desired. See
 # "CALL CONFIGURATION" section below.
 #
-# 6. Install script
+# 5. Install script
 # Install this script on the VM, and set up whatever monitoring is
 # desired. The supplied `bodbridge.service` script is intended for use
 # on systems running systemd.
@@ -69,12 +63,6 @@
 # will cause bodbridge to listen for HTTP POSTs on TCP 1234.
 #
 #
-# DATABASE CONFIGURATION
-# Credentials are read from ~/.my.cnf
-# If ~/.my.cnf is not found, username 'root' and blank password are used,
-# and the database is assumed to be reachable at localhost:3306.
-#
-#
 # CALL CONFIGURATION
 # bodbridge will use the name of the drink requested to create an
 # appropriate call when possible. It will look for calls with the following
@@ -90,13 +78,10 @@
 #  - Drink request
 #  - Service
 #
-# Calls are searched for in the call_config table, and must have
-# deleted=0.
-#
 # If no matching calls are found, no call is created.
 # If multiple matching calls exist, the one whose name matches a pattern
 # listed highest above will be used. If multiple calls exist for the
-# same pattern, the one with the lowest id_call_config is used.
+# same pattern, the one with the highest id_call_config is used.
 #
 #
 # MULTIPLE ITEMS IN ORDER
@@ -112,9 +97,9 @@
 # enabled that supports a beverage with the indicated name. See "CALL CONFIGURATION"
 # section for more information.
 #
-# Problem: APIInjectionError exceptions
+# Problem: APIRequestError exceptions
 # Resolution: Ensure that Kai API user credentials are set up with Kai,
-# and correctly specifeid in ~/kai_bod_api_credentials file. Also check
+# and correctly specifeid in the ./kai_bod_api_credentials file. Also check
 # that Kai API server is reachable from the machine running bodbridge as
 # https://username:password@sitename.kailabor.com/api/v3
 #
@@ -132,41 +117,8 @@
 #
 
 require 'sinatra'
+require 'rest-client'
 require 'json'
-require 'mysql2'
-
-DEFAULT_PORT = 4567
-DEFAULT_MYSQL_CREDENTIALS = { username:"root", password:"" }
-
-KAI_CREDENTIALS_FILE = File.expand_path("~/kai_bod_api_credentials")
-MY_CNF_FILE = File.expand_path("~/.my.cnf")
-
-enforce_command_line!
-port = ARGV.count >= 1 ? ARGV[0].to_i : DEFAULT_PORT
-api_creds = parse_api_credentials
-
-$config = {
-  kai:{
-    sitename:api_creds[:sitename],
-    username:api_creds[:username],
-    password:api_creds[:password],
-  },
-
-  mysql:{
-    host:"localhost",
-    port:3306
-  },
-
-  http:{
-    port:4567
-  },
-
-  version:"2019-04-29"
-}
-
-creds = parse_mycnf || DEFAULT_MYSQL_CREDENTIALS
-mysql_settings = $config[:mysql].merge(creds)
-$db = Mysql2::Client.new(mysql_settings)
 
 class UnsupportedRequestFormatError < StandardError
 end
@@ -174,7 +126,7 @@ end
 class UnsupportedDrinkError < StandardError
 end
 
-class APIInjectionError < StandardError
+class APIRequestError < StandardError
 end
 
 def enforce_command_line!
@@ -215,34 +167,6 @@ def demand_api_credentials!(msg=nil)
   exit 1
 end
 
-def parse_mycnf
-  path = MY_CNF_FILE
-  return nil unless File.exists?(path)
-  mycnf = IO.read(path)
-  creds = {host:"localhost"}
-  if m = mycnf.match(/user\s*=\s*([^\n]+)\n/) then
-    creds[:username] = m[1]
-  end
-
-  if m = mycnf.match(/password\s*=\s*([^\n]+)\n/)[1] then
-    pw = creds[:password] = m[1]
-    # strip quotation marks from password if present
-    if pw.start_with?('"') && pw.end_with?('"') && pw.length >= 2 then
-      creds[:password] = pw[1..-2]
-    end
-  end
-
-  if m = mycnf.match(/host\s*=\s*([^\n]+)\n/) then
-    creds[:host] = m[1]
-  end
-
-  if m = mycnf.match(/port\s*=\s*(\d+)/) then
-    creds[:port] = m[1].to_i
-  end
-
-  creds
-end
-
 def error_out(msg)
   timestamp = Time.now.strftime("%Y-%m-%d %H:%M:%S")
   STDERR.puts "#{timestamp} E: #{msg}"
@@ -254,6 +178,32 @@ def log(msg)
 end
 
 helpers do
+  def api_url(endpoint)
+    kai = $config[:kai]
+    url = "https://#{kai[:username]}:#{kai[:password]}@#{kai[:sitename]}.kailabor.com/api/v3/#{endpoint}"
+  end
+
+  def api_request(req_method, endpoint, data=nil)
+    args = data.nil? ? {} : {data:data.to_json, content_type: :json}
+    url = api_url(endpoint)
+    req_method = req_method.to_s.downcase.to_sym
+    uc_method = req_method.to_s.upcase
+
+    begin
+      resp = RestClient.send(req_method, url, args)
+      result = JSON.parse(resp.body, symbolize_names:true)
+    rescue RestClient::ExceptionWithResponse => err
+      case err.http_code
+      when 301, 302, 307
+        err.response.follow_redirection
+      else
+        raise APIRequestError, "Failed API request #{uc_method} #{url}: received HTTP #{err.http_code}.\nRequest body: #{args[:data] || "(null)"}\nResponse body:\n#{err.response.body}"
+      end
+    rescue Exception => exc
+      raise APIRequestError, "Failed API request #{uc_method} #{url}: caught exception #{exc.class} #{exc}.\nRequest body: #{args[:data] || "(null)"}"
+    end
+  end
+
   def map_request(request_json)
     begin
       request = parse_request(request_json)
@@ -274,15 +224,15 @@ helpers do
 
   def parse_request(request_json)
     begin
-      raw_request = JSON.parse(request_json, symbolize_names:true)
+      raw = JSON.parse(request_json, symbolize_names:true)
     rescue JSON::ParserError
       raise UnsupportedRequestFormatError, "Unable to parse request as JSON"
     end
 
-    raw.is_a?(Hash) &&
+    (raw.is_a?(Hash) &&
      raw[:order].is_a?(Hash) &&
-     raw[:order][:cart].is_a?(Array) &&
-     or raise UnsupportedRequestFormatError, "Unable to interpret request"
+     raw[:order][:cart].is_a?(Array)
+    ) or raise UnsupportedRequestFormatError, "Unable to interpret request"
 
     item = raw[:order][:cart].first or raise UnsupportedRequestFormatError, "No drinks included in request"
     item[:name] or raise UnsupportedRequestFormatError, "Requested drink did not include name field"
@@ -306,29 +256,24 @@ helpers do
   def find_call(drink_name)
     # find an id_call_config for a requested drink name
     patterns = [
-      "beverage\%#{drink_name}",
-      "request\%#{drink_name}",
-      "#{drink_name}\%request",
-      "#{drink_name}\%beverage",
-      drink_name,
-      "beverage request",
-      "drink request",
-      "service"
+      /beverage.*#{drink_name}/,
+      /request.*#{drink_name}/,
+      /#{drink_name}.*request/,
+      /#{drink_name}.*beverage/,
+      /#{drink_name}/,
+      /beverage request/,
+      /drink request/,
+      /service/,
     ]
 
-    stmt = $db.prepare("SELECT id_call_config, description " +
-      "FROM rt.call_config " +
-      "WHERE deleted=0 " +
-      "AND description ILIKE ? " +
-      "ORDER BY id_call_config ASC LIMIT 1")
+    resp = api_request(:get, "call-config")
 
     patterns.each do |pattern|
-      results = stmt.execute(pattern)
-      next unless results.count > 0
-      results.each do |result|
-        log "Mapping request for item '#{drink_name}' to id_call_config=#{result[:id_call_config]} ('#{result[:description]}')"
-        return result[:id_call_config]
-      end
+      matched_id = resp[:call_config]
+        .select { |cfg| cfg[:description].downcase.match(pattern) }
+        .map { |config| config[:id_call_config] }
+        .max
+      return matched_id unless matched_id.nil?
     end
 
     raise UnsupportedDrinkError, "Unable to find call for requested item: #{drink_name}"
@@ -342,38 +287,75 @@ helpers do
       description:request[:description]
     }
 
-    begin
-      kai = $config[:kai]
-      url = "https://#{kai[:username]}:#{kai[:password]}@#{kai[:sitename]}.kailabor.com/api/v3"
-      resp = RestClient.post url, data:kai_req.to_json, content_type: :json
-      log "Kai API accepted call with id_call_config=#{id_call_config} for drink #{request[:drink]} at location #{request[:location]}"
-    rescue RestClient::ExceptionWithResponse => err
-      case err.http_code
-      when 301, 302, 307
-        err.response.follow_redirection
-      else
-        raise APIInjectionError, "Unable to create call: received HTTP #{err.http_code}.\nRequest body: #{kai_req.to_json}\nResponse body:\n#{err.response.body}"
-      end
-    rescue Exception => exc
-      raise APIInjectionError, "Unable to create call: caught exception #{exc.class} #{exc}.\nRequest body: #{kai_req.to_json}"
-    end
+    resp = api_request(:post, "call", kai_req)
+    log "Kai API accepted call with id_call_config=#{id_call_config} for drink #{request[:drink]} at location #{request[:location]}"
+    resp
   end
 end
 
-BANNER = "IGT Beverage-on-Demand -> Kai API bridge #{$config[:version]}"
+DEFAULT_PORT = 4567
+KAI_CREDENTIALS_FILE = File.expand_path("./kai_bod_api_credentials")
+
+enforce_command_line!
+port = ARGV.count >= 1 ? ARGV[0].to_i : DEFAULT_PORT
+api_creds = parse_api_credentials
+
+$config = {
+  kai:{
+    sitename:api_creds[:sitename],
+    username:api_creds[:username],
+    password:api_creds[:password],
+  },
+
+  http:{
+    port:4567
+  },
+
+  version:"2019-04-30"
+}
+
+BANNER = "IGT Beverage-on-Demand -> Acres 4 Kai API bridge #{$config[:version]}"
 
 log BANNER
 log "Listening for Beverage-on-Demand HTTP POSTs on TCP port: #{$config[:http][:port]}"
+log "Configured API user: #{api_creds[:username]} @ #{api_creds[:sitename]}"
 
 set :port, $config[:http][:port]
 set :bind, '0.0.0.0'
 
-post '*' do
-  request_json = request.body.read
-  log "#{request.ip} #{request.request_method} #{request.url}: #{request_json}"
-  map_request(request_json)
-end
-
-get '*' do
+get '/' do
   BANNER
 end
+
+post '/bod' do
+  begin
+    request_json = request.body.read
+    log "#{request.ip} #{request.request_method} #{request.url}: #{request_json}"
+    map_request(request_json)
+  rescue Exception => exc
+    error_out "Caught exception handling request: #{exc.class} #{exc}"
+    raise exc
+  end
+end
+
+post '/test/parse' do
+  parse_request(request.body.read).to_json
+end
+
+post '/test/find_call' do
+  data = JSON.parse(request.body.read, symbolize_names:true)
+  { id_call_config:find_call(data[:drink]) }.to_json
+end
+
+post '/test/create_call' do
+  data = JSON.parse(request.body.read, symbolize_names:true)
+  id_call_config = data[:id_call_config] || 481
+  test_req = {
+          drink:data[:drink]       || "Diet Pepsi",
+       location:data[:location]    || "JJ0103",
+    description:data[:description] || "Test call",
+  }
+
+  create_call(id_call_config, test_req).to_json
+end
+
