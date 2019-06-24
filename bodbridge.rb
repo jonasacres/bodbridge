@@ -207,8 +207,7 @@ helpers do
     text = if ZONEFILE_SCRIPT && File.executable?(ZONEFILE_SCRIPT) then
       log "Updating zonefile from script at #{ZONEFILE_SCRIPT}"
       output = `"#{ZONEFILE_SCRIPT}"`
-      build_zonefile_from_api unless $?.to_i == 0
-      output
+      $?.to_i == 0 ? output : build_zonefile_from_api
     else
       build_zonefile_from_api
     end
@@ -219,7 +218,7 @@ helpers do
   def build_zonefile_from_api
     log "Updating zonefile from API"
     zones = {}
-    api_request(:get, "zone?all=true").each do |zone|
+    api_request(:get, "zone?full=true").each do |zone|
       zones[zone[:description]] = zone
     end
 
